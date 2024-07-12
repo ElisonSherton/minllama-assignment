@@ -43,8 +43,10 @@ class RMSNorm(torch.nn.Module):
         Returns:
             torch.Tensor: The normalized tensor.
         """
-        # todo
-        raise NotImplementedError
+        batch_size, embed_dimension = x.shape
+        rms_tensor = torch.sqrt(torch.sum(x * x, dim = 1) / embed_dimension)
+        out = x * self.weight / (rms_tensor + self.eps)
+        return out
 
     def forward(self, x):
         """
@@ -63,21 +65,21 @@ class RMSNorm(torch.nn.Module):
 class Attention(nn.Module):
     def __init__(self, config: LlamaConfig):
         super().__init__()
-        self.n_kv_heads = config.n_heads if config.n_kv_heads is None else config.n_kv_heads
-        assert config.n_heads % self.n_kv_heads == 0
-        model_parallel_size = 1
-        self.n_local_heads = config.n_heads // model_parallel_size
-        self.n_local_kv_heads = self.n_kv_heads // model_parallel_size
-        self.n_rep = self.n_local_heads // self.n_local_kv_heads
-        self.head_dim = config.dim // config.n_heads
-        self.max_seq_len = config.max_seq_len
-        self.compute_query = nn.Linear(config.dim, config.n_heads * self.head_dim, bias=False)
-        self.compute_key = nn.Linear(config.dim, self.n_kv_heads * self.head_dim, bias=False)
-        self.compute_value = nn.Linear(config.dim, self.n_kv_heads * self.head_dim, bias=False)
-        self.compute_output = nn.Linear(config.n_heads * self.head_dim, config.dim, bias=False)
-        self.attn_dropout = nn.Dropout(config.dropout)
-        self.resid_dropout = nn.Dropout(config.dropout)
-        self.dropout = config.dropout
+        self.n_kv_heads = config.n_heads if config.n_kv_heads is None else config.n_kv_heads # 8
+        assert config.n_heads % self.n_kv_heads == 0 # True
+        model_parallel_size = 1 # 1
+        self.n_local_heads = config.n_heads // model_parallel_size # 8
+        self.n_local_kv_heads = self.n_kv_heads // model_parallel_size # 8
+        self.n_rep = self.n_local_heads // self.n_local_kv_heads # 1
+        self.head_dim = config.dim // config.n_heads # 64
+        self.max_seq_len = config.max_seq_len # 1024
+        self.compute_query = nn.Linear(config.dim, config.n_heads * self.head_dim, bias=False) # 512 -> 8 * 64
+        self.compute_key = nn.Linear(config.dim, self.n_kv_heads * self.head_dim, bias=False) # 512 -> 8 * 64
+        self.compute_value = nn.Linear(config.dim, self.n_kv_heads * self.head_dim, bias=False) # 512 -> 8 * 64
+        self.compute_output = nn.Linear(config.n_heads * self.head_dim, config.dim, bias=False) # 8 * 64 -> 512
+        self.attn_dropout = nn.Dropout(config.dropout) # 0 probability
+        self.resid_dropout = nn.Dropout(config.dropout) # 0 probability
+        self.dropout = config.dropout # 0 probability
 
     def compute_query_key_value_scores(self,
                                        query: torch.Tensor,
@@ -93,8 +95,19 @@ class Attention(nn.Module):
         Make sure to use attention_dropout (self.attn_dropout) on the computed
         attention matrix before applying it to the value tensor.
         '''
-        # todo
-        raise NotImplementedError
+        eps = 1e-8
+
+        # Query, key, value Shape -> (batch_size, n_local_heads, seqlen, head_dimension)
+        unnormalized_attention_scores =  torch.bmm(query, key.transpose(2, 3)) / torch.sqrt(self.head_dim + eps) # batch_size, n_local_heads, seq_len, seq_len
+
+        # Compute the softmax of attention scores
+        attention_scores = F.softmax(unnormalized_attention_scores, dim = -1)
+
+        # Attention Scores: batch_size, n_local_heads, seq_len, seq_len
+        # Value Scores: batch_size, n_local_heads, seq_len, head_dimension
+        # Reweighted Scores Shape: batch_size, n_local_heads, seq_len, head_dimension
+        
+        return torch.bmm(attention_scores, value)
 
     def forward(
         self,
@@ -196,8 +209,21 @@ class LlamaLayer(nn.Module):
         5) add a residual connection from the unnormalized self-attention output to the
            output of the feed-forward network
         '''
-        # todo
-        raise NotImplementedError
+
+        # 1
+        lnormed = self.attention_norm(x)
+        # 2
+        attention = self.attention(lnormed)
+        # 3
+        out1 = x + attention
+        # 4
+        ffn_normed = self.ffn_norm(out1)
+        # 5
+        ffn_out = self.feed_forward(ffn_normed)
+        # 6
+        out = out1 + ffn_out
+
+        return out
 
 class Llama(LlamaPreTrainedModel):
     def __init__(self, config: LlamaConfig):
@@ -267,6 +293,7 @@ class Llama(LlamaPreTrainedModel):
         Most likely you'll want to make sure to be in model.eval() mode of operation for this.
         Also note this is a super inefficient version of sampling with no key/value cache.
         """
+        
         for _ in range(max_new_tokens):
             # if the sequence context is growing too long we must crop it at block_size
             idx_cond = idx if idx.size(1) <= self.params.max_seq_len else idx[:, -self.params.max_seq_len:]
@@ -274,11 +301,11 @@ class Llama(LlamaPreTrainedModel):
             logits, _ = self(idx_cond)
             logits = logits[:, -1, :] # crop to just the final time step
             # todo
-            raise NotImplementedError
+            # raise NotImplementedError
 
             if temperature == 0.0:
                 # select the single most likely index
-                idx_next = None
+                idx_next = logits.argmax(dim = -1, keepdim = True)
             else:
                 '''
                 Perform temperature sampling:
@@ -289,10 +316,11 @@ class Llama(LlamaPreTrainedModel):
 
                 Note that we are not using top-k sampling/nucleus sampling in this procedure.
                 '''
-                idx_next = None
+                scaled_logits = logits / temperature
+                scaled_probabilities = F.softmax(scaled_logits, dim = -1)
+                idx_next = torch.multinomial(scaled_probabilities, num_samples = 1)
             # append sampled index to the running sequence and continue
             idx = torch.cat((idx, idx_next), dim=1)
-
 
         return idx
 
