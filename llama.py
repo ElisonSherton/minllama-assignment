@@ -43,8 +43,8 @@ class RMSNorm(torch.nn.Module):
         Returns:
             torch.Tensor: The normalized tensor.
         """
-        batch_size, embed_dimension = x.shape
-        rms_tensor = torch.sqrt(torch.sum(x * x, dim = 1) / embed_dimension)
+        batch_size, seqlen, embed_dimension = x.shape
+        rms_tensor = torch.sqrt(torch.sum(x * x, dim = -1, keepdim=True) / embed_dimension)
         out = x * self.weight / (rms_tensor + self.eps)
         return out
 
@@ -98,7 +98,7 @@ class Attention(nn.Module):
         eps = 1e-8
 
         # Query, key, value Shape -> (batch_size, n_local_heads, seqlen, head_dimension)
-        unnormalized_attention_scores =  torch.bmm(query, key.transpose(2, 3)) / torch.sqrt(self.head_dim + eps) # batch_size, n_local_heads, seq_len, seq_len
+        unnormalized_attention_scores =  torch.matmul(query, key.transpose(2, 3)) / (self.head_dim ** 0.5 + eps) # batch_size, n_local_heads, seq_len, seq_len
 
         # Compute the softmax of attention scores
         attention_scores = F.softmax(unnormalized_attention_scores, dim = -1)
@@ -107,7 +107,7 @@ class Attention(nn.Module):
         # Value Scores: batch_size, n_local_heads, seq_len, head_dimension
         # Reweighted Scores Shape: batch_size, n_local_heads, seq_len, head_dimension
         
-        return torch.bmm(attention_scores, value)
+        return torch.matmul(attention_scores, value)
 
     def forward(
         self,
