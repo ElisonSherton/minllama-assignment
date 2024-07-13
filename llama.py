@@ -102,12 +102,14 @@ class Attention(nn.Module):
 
         # Compute the softmax of attention scores
         attention_scores = F.softmax(unnormalized_attention_scores, dim = -1)
+        attention_scores = self.attn_dropout(attention_scores)
+
 
         # Attention Scores: batch_size, n_local_heads, seq_len, seq_len
         # Value Scores: batch_size, n_local_heads, seq_len, head_dimension
         # Reweighted Scores Shape: batch_size, n_local_heads, seq_len, head_dimension
         
-        return torch.matmul(attention_scores, value)
+        return self.resid_dropout(torch.matmul(attention_scores, value))
 
     def forward(
         self,
