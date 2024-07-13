@@ -44,8 +44,8 @@ class RMSNorm(torch.nn.Module):
             torch.Tensor: The normalized tensor.
         """
         batch_size, seqlen, embed_dimension = x.shape
-        rms_tensor = torch.sqrt(torch.sum(x * x, dim = -1, keepdim=True) / embed_dimension)
-        out = x * self.weight / (rms_tensor + self.eps)
+        rms_tensor = torch.sqrt(torch.sum(x * x, dim = -1, keepdim=True) / embed_dimension + self.eps)
+        out = x / rms_tensor
         return out
 
     def forward(self, x):
@@ -96,11 +96,13 @@ class Attention(nn.Module):
         attention matrix before applying it to the value tensor.
         '''
         eps = 1e-8
+        *_, embed_dimension = query.shape
 
         # Query, key, value Shape -> (batch_size, n_local_heads, seqlen, head_dimension)
-        unnormalized_attention_scores =  torch.matmul(query, key.transpose(2, 3)) / (self.head_dim ** 0.5 + eps) # batch_size, n_local_heads, seq_len, seq_len
+        unnormalized_attention_scores =  torch.matmul(query, key.transpose(2, 3)) / ((embed_dimension) ** 0.5 + eps) # batch_size, n_local_heads, seq_len, seq_len
 
         # Compute the softmax of attention scores
+        # batch_size, n_local_heads, seqlen, seqlen
         attention_scores = F.softmax(unnormalized_attention_scores, dim = -1)
         attention_scores = self.attn_dropout(attention_scores)
 
@@ -109,7 +111,7 @@ class Attention(nn.Module):
         # Value Scores: batch_size, n_local_heads, seq_len, head_dimension
         # Reweighted Scores Shape: batch_size, n_local_heads, seq_len, head_dimension
         
-        return self.resid_dropout(torch.matmul(attention_scores, value))
+        return torch.matmul(attention_scores, value)
 
     def forward(
         self,
@@ -206,9 +208,9 @@ class LlamaLayer(nn.Module):
         1) layer normalization of the input (via Root Mean Square layer normalization)
         2) self-attention on the layer-normalized input
         3) a residual connection (i.e., add the input to the output of the self-attention)
-        3) layer normalization on the output of the self-attention
-        4) a feed-forward network on the layer-normalized output of the self-attention
-        5) add a residual connection from the unnormalized self-attention output to the
+        4) layer normalization on the output of the self-attention
+        5) a feed-forward network on the layer-normalized output of the self-attention
+        6) add a residual connection from the unnormalized self-attention output to the
            output of the feed-forward network
         '''
 
